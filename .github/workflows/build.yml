@@ -7,52 +7,51 @@ jobs:
   build-os:
     runs-on: ubuntu-24.04
     steps:
-    - name: Install Compiler Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc rsync cpio wget
+      - name: Install Compiler Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc rsync cpio wget
 
-    - name: Build BusyBox Root Filesystem
-      run: |
-        wget https://busybox.net
-        tar -xf busybox-1.36.1.tar.bz2
-        cd busybox-1.36.1
-        make defconfig
-        sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-        make -j$(nproc)
-        make install
-        cd ..
+      - name: Build BusyBox Root Filesystem
+        run: |
+          wget https://busybox.net
+          tar -xf busybox-1.36.1.tar.bz2
+          cd busybox-1.36.1
+          make defconfig
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          make -j$(nproc)
+          make install
 
-    - name: Package Initramfs Filesystem
-      run: |
-        mkdir base_root
-        cd base_root
-        cp -av ../busybox-1.36.1/_install/* .
-        mkdir -p dev proc sys
-        echo '#!/bin/sh' > init
-        echo 'mount -t proc none /proc' >> init
-        echo 'mount -t sysfs none /sys' >> init
-        echo 'echo "=============================================="' >> init
-        echo 'echo " Welcome to your Custom Cloud-Built Linux OS! "' >> init
-        echo 'echo "=============================================="' >> init
-        echo 'exec /bin/sh' >> init
-        chmod +x init
-        find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
-        cd ..
+      - name: Package Initramfs Filesystem
+        run: |
+          mkdir -p base_root/dev base_root/proc base_root/sys
+          cp -av busybox-1.36.1/_install/* base_root/
+          
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'mount -t proc none /proc' \
+            'mount -t sysfs none /sys' \
+            'echo "=============================================="' \
+            'echo " Welcome to your Custom Cloud-Built Linux OS! "' \
+            'echo "=============================================="' \
+            'exec /bin/sh' > base_root/init
+            
+          chmod +x base_root/init
+          cd base_root
+          find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
 
-    - name: Compile Minimal Linux Kernel
-      run: |
-        wget https://kernel.org
-        tar -xf linux-6.6.21.tar.xz
-        cd linux-6.6.21
-        make kvm_guestdefconfig
-        make -j$(nproc) bzImage
-        cd ..
+      - name: Compile Minimal Linux Kernel
+        run: |
+          wget https://kernel.org
+          tar -xf linux-6.6.21.tar.xz
+          cd linux-6.6.21
+          make kvm_guestdefconfig
+          make -j$(nproc) bzImage
 
-    - name: Upload Finished OS Files
-      uses: actions/upload-artifact@v4
-      with:
-        name: my-micro-linux-os
-        path: |
-          linux-6.6.21/arch/x86/boot/bzImage
-          initramfs.cpio.gz
+      - name: Upload Finished OS Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-micro-linux-os
+          path: |
+            linux-6.6.21/arch/x86/boot/bzImage
+            initramfs.cpio.gz
