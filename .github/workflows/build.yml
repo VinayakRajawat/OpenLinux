@@ -1,4 +1,4 @@
-name: Build Micro Linux OS
+name: Build Debian Micro OS
 
 on:
   workflow_dispatch:
@@ -7,51 +7,71 @@ jobs:
   build-os:
     runs-on: ubuntu-24.04
     steps:
-      - name: Install Compiler Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc rsync cpio wget
+      - name: Install Build Dependencies
+        run: sudo apt-get update && sudo apt-get install -y debootstrap cpio gzip
 
-      - name: Build BusyBox Root Filesystem
+      - name: Build Debian Base System
         run: |
-          wget https://busybox.net
-          tar -xf busybox-1.36.1.tar.bz2
-          cd busybox-1.36.1
-          make defconfig
-          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-          make -j$(nproc)
-          make install
+          # Pulls a tiny, bare-minimum Debian 12 (Bookworm) base system
+          sudo debootstrap --variant=minbase bookworm ./base_root http://deb.debian.org/debian/
 
-      - name: Package Initramfs Filesystem
+      - name: Install Packages via APT (Customize Here!)
         run: |
-          mkdir -p base_root/dev base_root/proc base_root/sys
-          cp -av busybox-1.36.1/_install/* base_root/
+          # Mount necessary virtual filesystems so apt works correctly inside chroot
+          sudo mount --bind /dev ./base_root/dev
+          sudo mount --bind /proc ./base_root/proc
+          sudo mount --bind /sys ./base_root/sys
           
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'mount -t proc none /proc' \
-            'mount -t sysfs none /sys' \
-            'echo "=============================================="' \
-            'echo " Welcome to your Custom Cloud-Built Linux OS! "' \
-            'echo "=============================================="' \
-            'exec /bin/sh' > base_root/init
-            
-          chmod +x base_root/init
-          cd base_root
-          find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
+          # Chroot in and run apt-get
+          # Note: linux-image-amd64 gives us our pre-compiled kernel. 
+          # Add ANY massive packages you want to the end of this list!
+          sudo chroot ./base_root /bin/bash -c "
+            apt-get update && \
+            apt-get install -y --no-install-recommends \
+              linux-image-amd64 \
+              python3 \
+              curl \
+              htop \
+              git
+          "
+          
+          # Clean up apt cache to save space, then unmount
+          sudo chroot ./base_root /bin/bash -c "apt-get clean"
+          sudo umount ./base_root/sys
+          sudo umount ./base_root/proc
+          sudo umount ./base_root/dev
 
-      - name: Compile Minimal Linux Kernel
+      - name: Setup Init Script
         run: |
-          wget https://kernel.org
-          tar -xf linux-6.6.21.tar.xz
-          cd linux-6.6.21
-          make kvm_guestdefconfig
-          make -j$(nproc) bzImage
+          sudo bash -c 'cat <<EOF > base_root/init
+          #!/bin/bash
+          export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+          mount -t proc none /proc
+          mount -t sysfs none /sys
+          mount -t devtmpfs none /dev
+          
+          echo "=============================================="
+          echo " Welcome to your Debian-based Custom OS!      "
+          echo "=============================================="
+          
+          exec /bin/bash
+          EOF'
+          sudo chmod +x base_root/init
+
+      - name: Extract Kernel & Package Initramfs
+        run: |
+          # Copy the installed kernel out of the chroot to act as our bootable kernel
+          sudo cp base_root/boot/vmlinuz-*amd64 ./bzImage
+          
+          # Package the file system into initramfs
+          cd base_root
+          sudo find . -print0 | sudo cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
+          cd ..
 
       - name: Upload Finished OS Files
         uses: actions/upload-artifact@v4
         with:
-          name: my-micro-linux-os
+          name: my-debian-linux-os
           path: |
-            linux-6.6.21/arch/x86/boot/bzImage
+            bzImage
             initramfs.cpio.gz
