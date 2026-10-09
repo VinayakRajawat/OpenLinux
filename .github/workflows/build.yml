@@ -1,77 +1,56 @@
-name: Build Debian Micro OS
+name: OLD Live ISO
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
 
 jobs:
-  build-os:
-    runs-on: ubuntu-24.04
+  build-iso:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Install Build Dependencies
-        run: sudo apt-get update && sudo apt-get install -y debootstrap cpio gzip
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Build Debian Base System
+      - name: Install Dependencies
         run: |
-          # Pulls a tiny, bare-minimum Debian 12 (Bookworm) base system
-          sudo debootstrap --variant=minbase bookworm ./base_root http://deb.debian.org/debian/
+          sudo apt-get update
+          sudo apt-get install -y live-build debootstrap squashfs-tools xorriso
 
-      - name: Install Packages via APT (Customize Here!)
+      - name: Configure Live Build Environment
         run: |
-          # Mount necessary virtual filesystems so apt works correctly inside chroot
-          sudo mount --bind /dev ./base_root/dev
-          sudo mount --bind /proc ./base_root/proc
-          sudo mount --bind /sys ./base_root/sys
+          mkdir -p live-config
+          cd live-config
           
-          # Chroot in and run apt-get
-          # Note: linux-image-amd64 gives us our pre-compiled kernel. 
-          # Add ANY massive packages you want to the end of this list!
-          sudo chroot ./base_root /bin/bash -c "
-            apt-get update && \
-            apt-get install -y --no-install-recommends \
-              linux-image-amd64 \
-              python3 \
-              curl \
-              htop \
-              git
-          "
-          
-          # Clean up apt cache to save space, then unmount
-          sudo chroot ./base_root /bin/bash -c "apt-get clean"
-          sudo umount ./base_root/sys
-          sudo umount ./base_root/proc
-          sudo umount ./base_root/dev
+          # Initialize live-build configuration for Debian (Bookworm)
+          lb config \
+            --distribution bookworm \
+            --architecture amd64 \
+            --binary-images iso-hybrid \
+            --apt-recommends false \
+            --memtest none
 
-      - name: Setup Init Script
+          # Add custom packages to be baked into the image
+          echo "linux-image-amd64 python3 curl git htop bat tldr fish starship xorg xinit xfce4 plank" > config/package-lists/studyos.list.chroot
+
+      - name: Build the ISO Image
         run: |
-          sudo bash -c 'cat <<EOF > base_root/init
-          #!/bin/bash
-          export PATH=/sbin:/usr/sbin:/bin:/usr/bin
-          mount -t proc none /proc
-          mount -t sysfs none /sys
-          mount -t devtmpfs none /dev
-          
-          echo "=============================================="
-          echo " Welcome to your Debian-based Custom OS!      "
-          echo "=============================================="
-          
-          exec /bin/bash
-          EOF'
-          sudo chmod +x base_root/init
+          cd live-config
+          sudo lb build
 
-      - name: Extract Kernel & Package Initramfs
+      - name: Locate and Rename ISO
         run: |
-          # Copy the installed kernel out of the chroot to act as our bootable kernel
-          sudo cp base_root/boot/vmlinuz-*amd64 ./bzImage
-          
-          # Package the file system into initramfs
-          cd base_root
-          sudo find . -print0 | sudo cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
-          cd ..
+          cd live-config
+          mv live-image-amd64.hybrid.iso studyos-universal.iso
+          ls -lh studyos-universal.iso
 
-      - name: Upload Finished OS Files
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release and Upload ISO
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: my-debian-linux-os
-          path: |
-            bzImage
-            initramfs.cpio.gz
+          files: live-config/studyos-universal.iso
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
