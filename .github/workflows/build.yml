@@ -1,240 +1,77 @@
-name: Build OpenLinux Debian ISO
+name: Build OpenOS ISO
 
 on:
   push:
-    branches: ["main"]
-    tags: ["v*"]
+    branches: [ "main" ]
+    tags:
+      - 'v*'
   workflow_dispatch:
-    inputs:
-      profile:
-        description: ISO profile to build
-        required: true
-        type: choice
-        default: both
-        options:
-          - both
-          - terminal
-          - desktop
-
-permissions:
-  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Check out repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Debian live-build tools
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            live-build debootstrap xorriso squashfs-tools
+          sudo apt-get install -y debootstrap squashfs-tools xorriso
 
-      - name: Build selected ISO profile(s)
-        env:
-          PROFILE: ${{ inputs.profile || 'both' }}
+      - name: Build Custom Debian OpenOS ISO
         run: |
-          set -euo pipefail
-          mkdir -p dist
+          # 1. Create a minimal Debian Bookworm root file system
+          sudo debootstrap --arch=amd64 bookworm rootfs http://deb.debian.org/debian/
 
-          if [[ "$PROFILE" == "both" ]]; then
-            profiles=(terminal desktop)
-          else
-            profiles=("$PROFILE")
-          fi
+          # 2. Install all core packages, study tools, and optional GUI/dock packages inside chroot
+          sudo chroot rootfs bash -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              linux-image-amd64 \
+              python3 \
+              curl \
+              git \
+              htop \
+              bat \
+              tldr \
+              fish \
+              starship \
+              xorg \
+              xinit \
+              xfce4 \
+              plank \
+              sudo
+            apt-get clean
+          '
 
-          for profile in "${profiles[@]}"; do
-            work="$RUNNER_TEMP/openlinux-$profile"
-            rm -rf "$work"
-            mkdir -p "$work"
-            cd "$work"
+          # 3. Create live ISO directory structure
+          mkdir -p iso_root/live
 
-            lb config \
-              --distribution bookworm \
-              --architectures amd64 \
-              --binary-images iso-hybrid \
-              --debian-installer live \
-              --archive-areas "main contrib non-free non-free-firmware" \
-              --apt-recommends false \
-              --apt-indices false \
-              --apt-source-archives false \
-              --bootappend-live "boot=live components username=openlinux hostname=openlinux quiet"
+          # 4. Compress rootfs into squashfs
+          sudo mksquashfs rootfs iso_root/live/filesystem.squashfs -comp xz -b 1048576
 
-            mkdir -p config/package-lists \
-              config/includes.chroot/usr/local/bin \
-              config/includes.chroot/usr/share/applications
+          # 5. Extract Linux kernel and initrd
+          cp rootfs/boot/vmlinuz-* iso_root/live/vmlinuz
+          cp rootfs/boot/initrd.img-* iso_root/live/initrd.img
 
-            cat > config/package-lists/openlinux.list.chroot <<'PACKAGES'
-          live-boot
-          live-config
-          live-installer
-          linux-image-amd64
-          systemd-sysv
-          sudo
-          ca-certificates
-          curl
-          git
-          htop
-          less
-          nano
-          vim-tiny
-          tmux
-          python3
-          network-manager
-          PACKAGES
+          # 6. Generate the final bootable ISO image
+          xorriso -as mkisofs \
+            -iso-level 3 \
+            -full-iso9660-filenames \
+            -volid "OPENOS_LIVE" \
+            -output OpenOS-Debian.iso \
+            iso_root
 
-            if [[ "$profile" == "desktop" ]]; then
-              cat >> config/package-lists/openlinux.list.chroot <<'PACKAGES'
-          xfce4
-          xfce4-terminal
-          xfce4-whiskermenu-plugin
-          lightdm
-          network-manager-gnome
-          gvfs
-          zenity
-          arc-theme
-          papirus-icon-theme
-          PACKAGES
+          ls -lh OpenOS-Debian.iso
 
-              mkdir -p config/includes.chroot/etc/lightdm/lightdm.conf.d
-              cat > config/includes.chroot/etc/lightdm/lightdm.conf.d/10-openlinux-live.conf <<'LIGHTDM'
-          [Seat:*]
-          autologin-user=openlinux
-          autologin-user-timeout=0
-          LIGHTDM
-
-              cat > config/includes.chroot/usr/local/bin/openlinux-theme <<'THEME'
-          #!/bin/sh
-          set -eu
-
-          choice="${1:-}"
-          if [ -z "$choice" ]; then
-            if ! command -v zenity >/dev/null 2>&1; then
-              echo "Usage: openlinux-theme {ChromeOS|Windows11|macOS}" >&2
-              exit 2
-            fi
-            if ! choice=$(zenity --list --title="OpenLinux appearance" \
-              --column="Choose a style" "ChromeOS" "Windows 11" "macOS"); then
-              exit 0
-            fi
-          fi
-
-          case "$choice" in
-            ChromeOS) theme="Arc"; icon="Papirus" ;;
-            "Windows 11"|Windows11) theme="Arc-Darker"; icon="Papirus-Dark" ;;
-            macOS) theme="Arc-Lighter"; icon="Papirus" ;;
-            *) echo "Unknown style: $choice" >&2; exit 2 ;;
-          esac
-
-          if ! command -v xfconf-query >/dev/null 2>&1; then
-            echo "Run this command inside an XFCE desktop session." >&2
-            exit 1
-          fi
-
-          xfconf-query --channel xsettings --property /Net/ThemeName \
-            --create --type string --set "$theme"
-          xfconf-query --channel xsettings --property /Net/IconThemeName \
-            --create --type string --set "$icon"
-          echo "Applied the $choice-inspired appearance."
-          THEME
-              chmod +x config/includes.chroot/usr/local/bin/openlinux-theme
-
-              cat > config/includes.chroot/usr/share/applications/openlinux-theme.desktop <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=Choose Desktop Style
-          Comment=Choose a ChromeOS-, Windows 11-, or macOS-inspired XFCE theme
-          Exec=openlinux-theme
-          Icon=preferences-desktop-theme
-          Categories=Settings;DesktopSettings;
-          Terminal=false
-          DESKTOP
-            fi
-
-            cat > config/includes.chroot/usr/local/bin/openlinux-ai <<'AI'
-          #!/usr/bin/python3
-          """Small OpenAI-compatible chat CLI; reads credentials from the environment."""
-          import json
-          import os
-          import sys
-          import urllib.error
-          import urllib.request
-
-          api_key = os.environ.get("OPENAI_API_KEY")
-          if not api_key:
-              sys.exit("Set OPENAI_API_KEY before running openlinux-ai.")
-
-          base_url = os.environ.get(
-              "OPENLINUX_AI_BASE_URL", "https://api.openai.com/v1"
-          ).rstrip("/")
-          model = os.environ.get("OPENLINUX_AI_MODEL", "gpt-4o-mini")
-          messages = []
-
-          def ask(prompt):
-              messages.append({"role": "user", "content": prompt})
-              body = json.dumps({"model": model, "messages": messages}).encode()
-              request = urllib.request.Request(
-                  base_url + "/chat/completions",
-                  data=body,
-                  headers={
-                      "Authorization": "Bearer " + api_key,
-                      "Content-Type": "application/json",
-                  },
-              )
-              try:
-                  with urllib.request.urlopen(request, timeout=120) as response:
-                      result = json.load(response)
-              except urllib.error.HTTPError as error:
-                  detail = error.read().decode("utf-8", errors="replace")
-                  sys.exit(f"AI API returned HTTP {error.code}: {detail}")
-              except urllib.error.URLError as error:
-                  sys.exit(f"Could not reach the AI API: {error.reason}")
-
-              answer = result["choices"][0]["message"]["content"]
-              messages.append({"role": "assistant", "content": answer})
-              print(answer)
-
-          if len(sys.argv) > 1:
-              ask(" ".join(sys.argv[1:]))
-          else:
-              print(f"OpenLinux AI ({model}); type /exit to quit.")
-              while True:
-                  try:
-                      prompt = input("you> ").strip()
-                  except (EOFError, KeyboardInterrupt):
-                      print()
-                      break
-                  if prompt in ("/exit", "/quit"):
-                      break
-                  if prompt:
-                      ask(prompt)
-          AI
-            chmod +x config/includes.chroot/usr/local/bin/openlinux-ai
-
-            sudo lb build
-            iso=$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)
-            if [[ -z "$iso" ]]; then
-              echo "live-build completed without producing an ISO for $profile." >&2
-              exit 1
-            fi
-            cp "$iso" "$GITHUB_WORKSPACE/dist/OpenLinux-${profile}-bookworm-amd64.iso"
-            cd "$GITHUB_WORKSPACE"
-          done
-
-      - name: Upload ISO artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: openlinux-debian-isos
-          path: dist/*.iso
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Attach ISOs to GitHub release
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.iso
+          files: OpenOS-Debian.iso
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
