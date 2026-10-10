@@ -1,17 +1,54 @@
-apt-get install -y --no-install-recommends \
-  linux-image-amd64 \
-  python3 \
-  curl \
-  git \
-  htop \
-  bat \
-  tldr \
-  fish \
-  starship \
-  xorg \
-  xinit \
-  xfce4 \
-  plank \
-  sudo \
-  live-boot \
-  systemd-sysv
+name: Build OpenOS ISO
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Full ISO via Docker Container
+        run: |
+          docker run --privileged --rm -v ${{ github.workspace }}:/workspace debian:bookworm-slim bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y debootstrap squashfs-tools xorriso genisoimage isolinux syslinux-common
+
+            debootstrap --arch=amd64 bookworm /workspace/rootfs http://deb.debian.org/debian/
+
+            chroot /workspace/rootfs bash -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                linux-image-amd64 python3 curl git htop bat tldr fish starship xorg xinit xfce4 plank sudo live-boot systemd-sysv
+              apt-get clean
+            '
+
+            mkdir -p /workspace/iso_root/live
+            mksquashfs /workspace/rootfs /workspace/iso_root/live/filesystem.squashfs -comp xz -b 1048576 -noappend
+
+            # Copy exact kernel and initrd versions
+            cp /workspace/rootfs/boot/vmlinuz-* /workspace/iso_root/live/vmlinuz
+            cp /workspace/rootfs/boot/initrd.img-* /workspace/iso_root/live/initrd.img
+
+            # Build proper bootable hybrid ISO
+            xorriso -as mkisofs \
+              -iso-level 3 \
+              -full-iso9660-filenames \
+              -volid \"OPENOS_LIVE\" \
+              -output /workspace/OpenOS-Debian.iso \
+              /workspace/iso_root
+          "
+          ls -lh OpenOS-Debian.iso
