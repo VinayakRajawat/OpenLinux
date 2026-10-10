@@ -26,27 +26,13 @@ jobs:
             apt-get update
             apt-get install -y debootstrap squashfs-tools xorriso genisoimage
             
-            # Bootstrap inside docker container where root/loop permissions are allowed
             debootstrap --arch=amd64 bookworm /workspace/rootfs http://deb.debian.org/debian/
             
             chroot /workspace/rootfs bash -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install -y --no-install-recommends \
-                linux-image-amd64 \
-                python3 \
-                curl \
-                git \
-                htop \
-                bat \
-                tldr \
-                fish \
-                starship \
-                xorg \
-                xinit \
-                xfce4 \
-                plank \
-                sudo
+                linux-image-amd64 python3 curl git htop bat tldr fish starship xorg xinit xfce4 plank sudo
               apt-get clean
             '
             
@@ -64,6 +50,12 @@ jobs:
               /workspace/iso_root
           "
           ls -lh OpenOS-Debian.iso
+
+      - name: Upload ISO as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenOS-Debian-ISO
+          path: OpenOS-Debian.iso
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
